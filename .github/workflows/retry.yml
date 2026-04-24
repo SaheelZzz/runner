@@ -1,0 +1,57 @@
+name: 24-7 Mumbai VM Grabber
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  loop-request:
+    runs-on: ubuntu-latest
+    concurrency: 
+      group: oci-grabber
+      cancel-in-progress: true
+      
+    steps:
+      - name: Install OCI CLI
+        run: |
+          pip install oci-cli
+          echo "/home/runner/.local/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+          echo "region=ap-mumbai-1" >> ~/.oci/config
+          echo "key_file=~/.oci/key.pem" >> ~/.oci/config
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          echo "OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True" >> $GITHUB_ENV
+
+      - name: Direct Launch Loop (60s interval)
+        run: |
+          end=$((SECONDS+1500))
+          while [ $SECONDS -lt $end ]; do
+            echo "Attempting launch at $(date)"
+            
+            # The '|| true' at the end prevents the script from crashing on errors
+            RESULT=$(oci resource-manager job create-apply-job \
+              --stack-id ${{ secrets.OCI_STACK_OCID }} \
+              --execution-plan-strategy AUTO_APPROVED 2>&1 || true)
+            
+            if [[ "$RESULT" == *"TooManyRequests"* ]]; then
+              echo "Status: 429. Hit Rate Limit. Sleeping for 5 minutes..."
+              sleep 300
+            elif [[ "$RESULT" == *"Out of host capacity"* ]]; then
+              echo "Status: 500. Out of Capacity. Retrying in 60s..."
+              sleep 60
+            elif [[ "$RESULT" == *"ACCEPTED"* ]]; then
+              echo "Status: 200. Job submitted successfully! Waiting 60s..."
+              sleep 60
+            else
+              echo "Response: $RESULT"
+              sleep 60
+            fi
+          done
